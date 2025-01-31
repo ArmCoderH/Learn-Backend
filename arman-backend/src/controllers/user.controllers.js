@@ -1,78 +1,172 @@
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.model.js";
-import {ApiError } from "../utils/ApiError.js";
-import {uploadFile} from "../utils/cloudnary.js"
+import { ApiError } from "../utils/ApiError.js";
+import { uploadFile } from "../utils/cloudnary.js";
 import { ApiResponse } from "../utils/ApiRespons.js";
+import jwt from 'jsonwebtoken'
 
-const registerUser = asyncHandler(async (req,res) => {
-    const { fullname, email, password,username } = req.body
-    console.log("email: ",email);
+// Function to generate access and refresh tokens
+const generateAccessAndRefreshToken = async (userId) => {
+    try {
+        const user = await User.findById(userId);
+
+        if (!user) {
+            throw new ApiError(404, "User not found");
+        }
+
+        const accessToken = user.generateAccessToken();
+        const refreshToken = user.generateRefreshToken();
+
+        user.refreshToken = refreshToken;
+        await user.save({ validateBeforeSave: false });
+
+        return { accessToken, refreshToken };
+    } catch (error) {
+        console.error("Token Generation Error:", error);
+        throw new ApiError(500, "Something went wrong during token generation");
+    }
+};
+
+// Register User
+const registerUser = asyncHandler(async (req, res) => {
+    const { fullname, email, password, username } = req.body;
+
+    if (!fullname) throw new ApiError(400, "Fullname is required");
+    if (!email) throw new ApiError(400, "Email is required");
+    if (!password) throw new ApiError(400, "Password is required");
+    if (!username) throw new ApiError(400, "Username is required");
+
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+
+    if (existingUser) {
+        throw new ApiError(400, "Username or Email already exists");
+    }
+
+    const avatarPath = req.files?.avatar?.[0]?.path;
+    const coverPath = req.files?.coverImage?.[0]?.path;
+
+    if (!avatarPath) throw new ApiError(400, "Avatar is required");
+    if (!coverPath) throw new ApiError(400, "Cover image is required");
+
+    const avatar = await uploadFile(avatarPath);
+    const coverImage = await uploadFile(coverPath);
+
+    if (!avatar) throw new ApiError(400, "Failed to upload avatar");
+    if (!coverImage) throw new ApiError(400, "Failed to upload cover image");
+
+    const user = await User.create({
+        fullname,
+        email,
+        password,
+        username: username.toLowerCase(),
+        avatar: avatar.url,
+        coverImage: coverImage?.url || ""
+    });
+
+    const createdUser = await User.findById(user._id).select("-password -refreshToken");
+
+    if (!createdUser) {
+        throw new ApiError(500, "Failed to create user");
+    }
+
+    return res.status(201).json(new ApiResponse(201, createdUser, "User created successfully"));
+});
+
+// Login User
+const loginUser = asyncHandler(async (req, res) => {
+    const { email, username, password } = req.body;
+
+    if (!email && !username) {
+        throw new ApiError(400, "Email or Username is required");
+    }
+
+    const user = await User.findOne({ $or: [{ email }, { username }] }).select("+password");
+
+    if (!user) {
+        throw new ApiError(400, "User not found");
+    }
+
+    const isPasswordValid = await user.isPasswordCorrect(password);
+
+    if (!isPasswordValid) {
+        throw new ApiError(401, "Invalid password");
+    }
+
+    const { accessToken, refreshToken } = await generateAccessAndRefreshToken(user._id);
+
+    const loggedInUser = await User.findById(user._id).select("-password -refreshToken");
+
+    const options = {
+        httpOnly: true,
+        secure: true
+    };
+
+    return res
+        .status(200)
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(new ApiResponse(200, { user: loggedInUser, accessToken, refreshToken }, "User logged in successfully"));
+});
+
+// Logout User
+const logoutUser = asyncHandler(async (req, res) => {
+    await User.findByIdAndUpdate(req.user._id, { $unset: { refreshToken: 1 } }, { new: true });
+
+    const options = {
+        httpOnly: true,
+        secure: true
+    };
+
+    return res
+        .status(200)
+        .clearCookie("accessToken", options)
+        .clearCookie("refreshToken", options)
+        .json(new ApiResponse(200, {}, "User logged out successfully"));
+});
+
+    const refreshAccesToken = asyncHandler(async (req,res)=>{
+    const incomingRefreshToken = req.cookie.refreshToken || req.body.refreshToken
+
+    if(refreshAccesToken){
+        throw new ApiError(410,"Unthorized request")
+    }
+
+    try {
+        const decodedToken = jwt.verify(
+            incomingRefreshToken, 
+            process.env.REFRESH_TOKEN_SECRET
+        )
     
-    if (fullname === "") {
-        throw new ApiError(400,"fullname is required");
-    }
-    if (email === "") {
-        throw new ApiError(400,"email is required");
-    }
-    if (password === "") {
-        throw new ApiError(400,"password is required");
-    }
-    if (username === "") {
-        throw new ApiError(400,"username is required");
-    }
-
-    const exitUser = User.findOne({
-        $or: [
-            { email },
-            { username },
-        ],
-    })
-
+        const user = await User.findById(decodedToken?._id)
     
-
-    if (exitUser) {
-        throw new ApiError(400,"User or email is already exist");
-    }
-
-    const avatarlocalPath = req.files?.avatar[0]?.path
-    const covelocalPath = req.files?.coverImage[0]?.path
-
-    if(!avatarlocalPath){
-        throw new ApiError(400,"avatar is required");
-    }
-    if(!covelocalPath){
-        throw new ApiError(400,"cover image is required");
-    }
-
+        if(!user){
+            throw new ApiError(401, "invalid refresh token")
+        }
+        
+        if (incomingRefreshToken !== user?.refreshToken) {
+            throw new ApiError(401, "refresh token is used")
+        }
     
-   const avatar =  await uploadFile(avatarlocalPath)
-   const coverImage =  await uploadFile(covelocalPath)
-
-   if(!avatar){
-    throw new ApiError(400,"Failed to upload avatar");
-   }
-
-   if(!coverImage){
-    throw new ApiError(400,"Failed to upload cover image");
-   }
-
-   const user = await User.create({
-    fullname,
-    email,
-    password,
-    username : username.toLowerCase(),
-    avatar : avatar.url,
-    coverImage :coverImage?.url || "",
-   })
-
-   const createUser = await User.findById(user._id).select("-password -refershToken")
-
-   if(!cerateUser){
-    throw new ApiError(500,"Failed to create user");
-   }
-   return res.status(201).json(
-    new ApiResponse(200,cerateUser,"user created successfully")
-   )
+        const options = {
+            httpOnly: true,
+            secure: true
+        }
+    
+        const {accessToken,newrefreshToken} = await generateAccessAndRefreshToken(user._id)
+    
+        return res
+        .status(200)
+        .cookie("accessToken",accessToken,options)
+        .cookie("refreshToken",newrefreshToken,options)
+        .json(
+            new ApiResponse(
+                200, 
+                {accessToken, refreshToken : newrefreshToken},
+                "Access token generated"
+            )
+        )
+    } catch (error) {
+        throw new ApiError(401,error?.message || "invalid refresh token")
+    }
 })
-
-export {registerUser} 
+export { registerUser, loginUser, logoutUser , refreshAccesToken};

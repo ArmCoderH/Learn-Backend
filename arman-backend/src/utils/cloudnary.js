@@ -20,7 +20,8 @@ import { v2 as cloudinary } from 'cloudinary';
 
             //file has been successfully
 
-            console.log("Uploading file",response.url);
+            // console.log("Uploading file",response.url);
+            fs.unlinkSync(filePath)
             return response
             
         } catch (error) {
